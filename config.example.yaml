@@ -1,0 +1,48 @@
+# 拉片分析工具配置
+api:
+  base_url: "http://llmapi.bilibili.co/v1"
+  api_key: "YOUR_API_KEY_HERE"
+  timeout: 600          # 单次请求超时（秒）
+  max_retries: 5        # 失败重试次数（指数退避）；网关会随机静默丢视频，靠重试规避
+
+# 分析所用模型。注意：gemini-3.7-flash 当前在网关上未部署（no cluster found），
+# 恢复后可切换；gemini-3.1-pro 已验证可用。
+model: "gemini-3.1-pro"
+
+# Web 服务可选模型下拉列表（第一个为默认）
+models:
+  - "gemini-3.1-pro"    # 已验证可用
+  - "gemini-3.7-flash"  # 网关未部署，恢复后可选
+
+chunk:
+  length_seconds: 120   # 每个视频块时长（秒）
+  max_width: 960        # 切块缩放宽度上限（控制体积，截帧仍用原视频）
+  fps: 5                # 切块帧率上限（模型按 ~1帧/秒采样，限帧率只为减小体积）
+  crf: 26               # 切块视频压缩质量（越大越小）
+  audio_bitrate: "64k"
+
+parallel:
+  workers: 4            # 并行分析的块数
+
+postprocess:
+  min_shot_duration: 2  # 过滤时长小于该值（秒）的幻影/退化分镜
+
+# 复刻（制作方法字段）相关约束，写进分析 Prompt
+production:
+  # 复刻时可用的素材通道，模型只能在此清单内选 material.type
+  # 七类：a-roll 真人出镜 / local 本地素材 / cloud 云端库 / web 时效检索
+  #      meme 表情包 / gen-img 生图 / gen-vid 生视频
+  available_material_types: ["a-roll", "local", "cloud", "web", "meme", "gen-img", "gen-vid"]
+  # 复刻目标画幅：source = 跟随原片；也可填 "9:16" / "16:9"，模型会在 notes 里给改版提示
+  target_aspect_ratio: "source"
+
+screenshot:
+  quality: 3            # ffmpeg -q:v，2~5 较合适
+  workers: 4            # 并行截帧线程数（每分镜截首/中/尾三帧）
+
+clip:
+  enabled: true         # 是否按分镜起止时间切分短片段（供网页逐分镜回看）
+  max_width: 720        # 分镜视频宽度上限（网页预览用，不用太高）
+  crf: 26               # 分镜视频压缩质量（越大越小）
+  audio_bitrate: "64k"  # 保留口播音频
+  workers: 4            # 并行切分线程数

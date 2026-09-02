@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>拉片分析服务</title>
+<style>
+  :root {
+    --accent: #3d6ef5;
+    --accent-soft: #eef3ff;
+    --bg: #f4f6fa;
+    --card: #ffffff;
+    --text: #1f2430;
+    --muted: #7a8499;
+    --border: #e5e9f2;
+    --green: #18a058;
+    --red: #d03050;
+    --gray: #8a93a6;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--text); line-height: 1.6;
+  }
+  header {
+    background: var(--card); border-bottom: 1px solid var(--border);
+    padding: 14px 0; position: sticky; top: 0; z-index: 10;
+  }
+  header .wrap { max-width: 1080px; margin: 0 auto; padding: 0 20px; display: flex; align-items: baseline; gap: 12px; }
+  header h1 { font-size: 19px; }
+  header .sub { color: var(--muted); font-size: 13px; }
+  main { max-width: 1080px; margin: 0 auto; padding: 20px; }
+  .card {
+    background: var(--card); border-radius: 12px; padding: 22px 24px;
+    margin-bottom: 20px; box-shadow: 0 1px 3px rgba(30, 40, 80, .06);
+  }
+  .card h2 { font-size: 16px; margin-bottom: 14px; }
+
+  /* 上传区 */
+  #drop-zone {
+    border: 2px dashed var(--border); border-radius: 10px; padding: 34px 20px;
+    text-align: center; color: var(--muted); cursor: pointer; transition: .15s;
+  }
+  #drop-zone:hover, #drop-zone.dragover { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+  #drop-zone .pick { color: var(--accent); text-decoration: underline; }
+  #file-info { margin-top: 12px; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+  #file-info .name { font-weight: 600; word-break: break-all; }
+  #file-info .size { color: var(--muted); white-space: nowrap; }
+  #file-info .clear { color: var(--red); cursor: pointer; font-size: 13px; white-space: nowrap; }
+  .form-row { display: flex; align-items: flex-end; gap: 16px; margin-top: 16px; flex-wrap: wrap; }
+  .form-row label { font-size: 14px; color: var(--muted); display: flex; flex-direction: column; gap: 6px; }
+  select {
+    font-size: 14px; padding: 8px 12px; border: 1px solid var(--border);
+    border-radius: 8px; background: #fff; color: var(--text); min-width: 220px;
+  }
+  button {
+    font-size: 14px; padding: 9px 26px; border: none; border-radius: 8px;
+    background: var(--accent); color: #fff; cursor: pointer; transition: .15s;
+  }
+  button:hover:not(:disabled) { filter: brightness(1.08); }
+  button:disabled { background: #b9c2d6; cursor: not-allowed; }
+  .bar { height: 8px; background: var(--border); border-radius: 99px; overflow: hidden; margin-top: 14px; }
+  .bar-inner { height: 100%; width: 0; background: var(--accent); border-radius: 99px; transition: width .2s; }
+  #upload-msg { font-size: 13px; margin-top: 8px; }
+  #upload-msg.err { color: var(--red); }
+  #upload-msg.ok { color: var(--green); }
+
+  /* 任务列表 */
+  .job { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px;
+         padding: 14px 0; border-top: 1px solid var(--border); }
+  .job:first-child { border-top: none; padding-top: 0; }
+  .job-name { font-weight: 600; font-size: 15px; word-break: break-all; }
+  .job-meta { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+  .job-status { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: 13px; flex-wrap: wrap; }
+  .badge { display: inline-block; padding: 1px 10px; border-radius: 99px; font-size: 12px; white-space: nowrap; }
+  .badge-queued { background: #f0f2f7; color: var(--gray); }
+  .badge-running { background: var(--accent-soft); color: var(--accent); }
+  .badge-done { background: #e7f7ee; color: var(--green); }
+  .badge-error { background: #fdeaee; color: var(--red); }
+  .stage { color: var(--muted); }
+  .job-error { color: var(--red); font-size: 12.5px; margin-top: 4px; word-break: break-all; }
+  .job-actions { display: flex; gap: 8px; flex-shrink: 0; }
+  .btn-sm { padding: 5px 14px; font-size: 13px; border-radius: 7px; }
+  .btn-ghost { background: #fff; border: 1px solid var(--border); color: var(--text); }
+  .btn-ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  .btn-danger:hover:not(:disabled) { border-color: var(--red); color: var(--red); }
+  .empty { color: var(--muted); text-align: center; padding: 22px 0 10px; font-size: 14px; }
+  .spinner {
+    display: inline-block; width: 13px; height: 13px; border: 2px solid var(--accent-soft);
+    border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* 结果区 */
+  #result-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+  #result-title { font-size: 16px; word-break: break-all; }
+  .result-meta { color: var(--muted); font-size: 13px; margin-top: 2px; }
+  .result-actions { display: flex; gap: 8px; flex-shrink: 0; }
+  .result-actions a {
+    font-size: 13px; padding: 5px 14px; border: 1px solid var(--border); border-radius: 7px;
+    color: var(--text); text-decoration: none;
+  }
+  .result-actions a:hover { border-color: var(--accent); color: var(--accent); }
+  .shot { display: flex; gap: 18px; padding: 18px 0; border-top: 1px solid var(--border); }
+  .shot-media { display: flex; flex-direction: column; gap: 8px; flex-shrink: 0; width: 300px; }
+  .shot-media video { width: 100%; border-radius: 8px; background: #111; display: block; }
+  .shot-media .thumbs { display: flex; gap: 6px; }
+  .shot-media .thumbs img {
+    flex: 1 1 0; min-width: 0; border-radius: 6px; background: #111; display: block;
+  }
+  .shot-media .media-tag {
+    font-size: 11px; color: var(--muted); margin-top: 3px; text-align: center;
+  }
+  .shot-body { flex: 1; min-width: 0; }
+  .shot-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px; flex-wrap: wrap; }
+  .shot-no { color: var(--accent); font-weight: 700; }
+  .shot-time { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+  .shot-row { font-size: 14px; margin-top: 6px; }
+  .shot-row .label {
+    display: inline-block; font-size: 12px; color: var(--muted); border: 1px solid var(--border);
+    border-radius: 5px; padding: 0 6px; margin-right: 8px; vertical-align: 1px;
+  }
+  /* 制作方法（复刻配方）折叠块 */
+  .prod { margin-top: 10px; font-size: 13.5px; }
+  .prod > summary {
+    cursor: pointer; color: var(--muted); font-size: 12.5px; list-style: none;
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
+  .prod > summary::-webkit-details-marker { display: none; }
+  .prod > summary::before { content: '▸'; color: var(--muted); }
+  .prod[open] > summary::before { content: '▾'; }
+  .prod > summary:hover { color: var(--accent); }
+  .prod-body {
+    margin-top: 8px; padding: 10px 12px; border-left: 2px solid var(--border);
+    background: rgba(127, 127, 127, .06); border-radius: 0 7px 7px 0;
+  }
+  .chip {
+    display: inline-block; font-size: 11.5px; padding: 1px 7px; border-radius: 20px;
+    border: 1px solid var(--border); color: var(--muted);
+  }
+  .chip.form { color: var(--accent); border-color: var(--accent); }
+  .chip.t-a-roll  { color: #e8734a; border-color: #e8734a; }
+  .chip.t-local   { color: #4aa3e8; border-color: #4aa3e8; }
+  .chip.t-cloud   { color: #4ac4b0; border-color: #4ac4b0; }
+  .chip.t-web     { color: #d9b23c; border-color: #d9b23c; }
+  .chip.t-meme    { color: #d264c0; border-color: #d264c0; }
+  .chip.t-gen-img { color: #9a7ce8; border-color: #9a7ce8; }
+  .chip.t-gen-vid { color: #e05561; border-color: #e05561; }
+  .prod-mat { margin: 7px 0; padding-left: 10px; border-left: 1px dashed var(--border); }
+  .prod-mat .mat-head { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; }
+  .prod-mat .mat-id { color: var(--muted); font-size: 12px; font-weight: 700; }
+  .prod-mat .mat-kv { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+  .prod-mat .mat-kv b { color: var(--text); font-weight: 400; }
+  .prod-line { margin-top: 7px; line-height: 1.6; }
+  .prod-line > .k { color: var(--muted); font-size: 12px; margin-right: 6px; }
+  .prod-text { margin: 4px 0 0; padding-left: 16px; }
+  .prod-text li { margin-top: 2px; }
+  .prod-text .role { color: var(--muted); font-size: 12px; }
+  @media (max-width: 960px) {
+    .shot-media { width: 230px; }
+  }
+  @media (max-width: 720px) {
+    .shot { flex-direction: column; }
+    .shot-media { width: 100%; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <h1>🎬 拉片分析服务</h1>
+    <span class="sub">知识类视频 → 分镜 / 口播文字 / 画面描述</span>
+  </div>
+</header>
+<main>
+  <section class="card">
+    <h2>上传视频</h2>
+    <div id="drop-zone">
+      拖拽视频文件到这里，或 <span class="pick">点击选择文件</span>
+      <input type="file" id="file-input" accept="video/*" hidden>
+    </div>
+    <div id="file-info" hidden>
+      <span>📹</span><span class="name"></span><span class="size"></span><span class="clear">✕ 移除</span>
+    </div>
+    <div class="form-row">
+      <label>分析模型
+        <select id="model-select"></select>
+      </label>
+      <button id="submit-btn" disabled>开始分析</button>
+    </div>
+    <div class="bar" id="upload-bar" hidden><div class="bar-inner" id="upload-bar-inner"></div></div>
+    <div id="upload-msg"></div>
+  </section>
+
+  <section class="card">
+    <h2>任务列表</h2>
+    <div id="job-list"><div class="empty">暂无任务，上传一个视频开始分析</div></div>
+  </section>
+
+  <section class="card" id="result-card" hidden>
+    <div id="result-head">
+      <div>
+        <div id="result-title"></div>
+        <div class="result-meta" id="result-meta"></div>
+      </div>
+      <div class="result-actions">
+        <a id="dl-json" download>下载 shots.json</a>
+        <a id="dl-md" download>下载 report.md</a>
+      </div>
+    </div>
+    <div id="shot-list"></div>
+  </section>
+</main>
+
+<script>
+const STATUS_NAMES = { queued: '排队中', running: '分析中', done: '已完成', error: '失败' };
+const STAGE_NAMES = { prepare: '准备中', split: '视频切块', analyze: '模型分析', screenshot: '截取画面', clip: '切分分镜视频', write: '生成报告' };
+
+const $ = s => document.querySelector(s);
+const dropZone = $('#drop-zone'), fileInput = $('#file-input'), fileInfo = $('#file-info');
+const modelSelect = $('#model-select'), submitBtn = $('#submit-btn');
+const uploadBar = $('#upload-bar'), uploadBarInner = $('#upload-bar-inner'), uploadMsg = $('#upload-msg');
+
+let selectedFile = null;
+let currentJobId = null;       // 本次提交的任务，完成后自动展开结果
+let viewingJobId = null;       // 结果区当前展示的任务
+let lastJobsJson = '';
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g,
+    c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function fmtSize(bytes) {
+  if (bytes >= 1 << 30) return (bytes / (1 << 30)).toFixed(2) + ' GB';
+  if (bytes >= 1 << 20) return (bytes / (1 << 20)).toFixed(1) + ' MB';
+  return Math.max(1, Math.round(bytes / 1024)) + ' KB';
+}
+function fmtTime(ts) {
+  return ts ? new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false }) : '';
+}
+
+// 「制作方法」复刻配方块（老结果没有该字段则不渲染）
+function renderProduction(prod) {
+  if (!prod || !prod.form) return '';
+  const materials = Array.isArray(prod.materials) ? prod.materials : [];
+  const textLayers = Array.isArray(prod.text_layers) ? prod.text_layers : [];
+
+  const summary = `<summary>
+    <span class="chip form">${escapeHtml(prod.form)}</span>
+    ${materials.length
+      ? materials.map(m => `<span class="chip t-${escapeHtml(m.type)}">${escapeHtml(m.type)}</span>`).join('')
+      : '<span class="chip">纯代码画</span>'}
+    <span>制作方法（复刻配方）</span>
+  </summary>`;
+
+  const mats = materials.map(m => {
+    const kv = [['检索/生成', m.query], ['规格', m.specs], ['处理', m.treatment]]
+      .filter(([, v]) => v)
+      .map(([k, v]) => `<div class="mat-kv">${k}：<b>${escapeHtml(v)}</b></div>`).join('');
+    return `<div class="prod-mat">
+      <div class="mat-head">
+        <span class="mat-id">${escapeHtml(m.id)}</span>
+        <span class="chip t-${escapeHtml(m.type)}">${escapeHtml(m.type)}</span>
+        ${m.role ? `<span class="mat-kv">${escapeHtml(m.role)}</span>` : ''}
+        <span>${escapeHtml(m.desc)}</span>
+      </div>${kv}
+    </div>`;
+  }).join('');
+
+  const texts = textLayers.length ? `<div class="prod-line">
+    <span class="k">屏显</span>
+    <ul class="prod-text">${textLayers.map(t => `<li>「${escapeHtml(t.content)}」
+      <span class="role">${escapeHtml([t.role, t.style].filter(Boolean).join(' · '))}</span></li>`).join('')}</ul>
+  </div>` : '';
+
+  const lines = [['构图', prod.layout], ['时间轴', prod.timeline], ['音效', prod.sfx], ['备注', prod.notes]]
+    .filter(([, v]) => v)
+    .map(([k, v]) => `<div class="prod-line"><span class="k">${k}</span>${escapeHtml(v)}</div>`).join('');
+
+  return `<details class="prod">${summary}
+    <div class="prod-body">${mats}${texts}${lines}</div>
+  </details>`;
+}
+
+// ---------- 模型选择 ----------
+async function loadModels() {
+  try {
+    const res = await fetch('/api/models');
+    const data = await res.json();
+    modelSelect.innerHTML = data.models.map(m =>
+      `<option value="${escapeHtml(m)}" ${m === data.default ? 'selected' : ''}>${escapeHtml(m)}</option>`
+    ).join('');
+  } catch (e) {
+    modelSelect.innerHTML = '<option value="">模型列表加载失败</option>';
+  }
+  refreshSubmit();
+}
+
+// ---------- 文件选择 ----------
+function setFile(file) {
+  selectedFile = file || null;
+  if (file) {
+    fileInfo.hidden = false;
+    fileInfo.querySelector('.name').textContent = file.name;
+    fileInfo.querySelector('.size').textContent = fmtSize(file.size);
+    uploadMsg.textContent = ''; uploadMsg.className = '';
+  } else {
+    fileInfo.hidden = true;
+    fileInput.value = '';
+  }
+  refreshSubmit();
+}
+function refreshSubmit() {
+  submitBtn.disabled = !(selectedFile && modelSelect.value);
+}
+dropZone.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => setFile(fileInput.files[0]));
+fileInfo.querySelector('.clear').addEventListener('click', e => { e.stopPropagation(); setFile(null); });
+['dragenter', 'dragover'].forEach(ev => dropZone.addEventListener(ev, e => {
+  e.preventDefault(); dropZone.classList.add('dragover');
+}));
+['dragleave', 'drop'].forEach(ev => dropZone.addEventListener(ev, e => {
+  e.preventDefault(); dropZone.classList.remove('dragover');
+}));
+dropZone.addEventListener('drop', e => {
+  const f = e.dataTransfer.files[0];
+  if (f) setFile(f);
+});
+
+// ---------- 提交上传 ----------
+submitBtn.addEventListener('click', () => {
+  if (!selectedFile) return;
+  submitBtn.disabled = true;
+  uploadBar.hidden = false;
+  uploadBarInner.style.width = '0%';
+  uploadMsg.textContent = '上传中…'; uploadMsg.className = '';
+
+  const fd = new FormData();
+  fd.append('file', selectedFile);
+  fd.append('model', modelSelect.value);
+
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/jobs');
+  xhr.upload.onprogress = e => {
+    if (e.lengthComputable) {
+      const pct = Math.round(e.loaded / e.total * 100);
+      uploadBarInner.style.width = pct + '%';
+      uploadMsg.textContent = `上传中… ${pct}%`;
+    }
+  };
+  xhr.onload = () => {
+    uploadBar.hidden = true;
+    if (xhr.status >= 200 && xhr.status < 300) {
+      const job = JSON.parse(xhr.responseText);
+      currentJobId = job.id;
+      uploadMsg.textContent = '已提交，排队分析中'; uploadMsg.className = 'ok';
+      setFile(null);
+      loadJobs();
+    } else {
+      let msg = '提交失败';
+      try { msg = JSON.parse(xhr.responseText).detail || msg; } catch (_) {}
+      uploadMsg.textContent = msg; uploadMsg.className = 'err';
+    }
+    refreshSubmit();
+  };
+  xhr.onerror = () => {
+    uploadBar.hidden = true;
+    uploadMsg.textContent = '网络错误，上传失败'; uploadMsg.className = 'err';
+    refreshSubmit();
+  };
+  xhr.send(fd);
+});
+
+// ---------- 任务列表 ----------
+function renderJobs(jobs) {
+  const list = $('#job-list');
+  if (!jobs.length) {
+    list.innerHTML = '<div class="empty">暂无任务，上传一个视频开始分析</div>';
+    return;
+  }
+  list.innerHTML = jobs.map(j => {
+    const badge = `<span class="badge badge-${j.status}">${STATUS_NAMES[j.status] || j.status}</span>`;
+    let statusExtra = '';
+    if (j.status === 'running') {
+      const stage = STAGE_NAMES[j.stage] || '';
+      statusExtra = `<span class="spinner"></span><span class="stage">${stage}${j.detail ? ' · ' + escapeHtml(j.detail) : ''}</span>`;
+    } else if (j.status === 'done') {
+      statusExtra = `<span class="stage">${j.shot_count ?? ''} 个分镜 · ${fmtTime(j.finished_at)}</span>`;
+    }
+    const err = j.error ? `<div class="job-error">${escapeHtml(j.error)}</div>` : '';
+    let actions = '';
+    if (j.status === 'done') {
+      actions = `<button class="btn-sm btn-ghost" onclick="viewResult('${j.id}')">查看结果</button>` +
+                `<button class="btn-sm btn-ghost" onclick="retryJob('${j.id}')" title="利用缓存重跑，只补齐缺失的分镜视频等产物">补齐视频</button>` +
+                `<button class="btn-sm btn-ghost btn-danger" onclick="removeJob('${j.id}')">删除</button>`;
+    } else if (j.status === 'error') {
+      actions = `<button class="btn-sm btn-ghost" onclick="retryJob('${j.id}')">重试</button>` +
+                `<button class="btn-sm btn-ghost btn-danger" onclick="removeJob('${j.id}')">删除</button>`;
+    }
+    return `<div class="job">
+      <div>
+        <div class="job-name">${escapeHtml(j.name)}</div>
+        <div class="job-meta">${escapeHtml(j.model)} · 提交于 ${fmtTime(j.created_at)}</div>
+        <div class="job-status">${badge}${statusExtra}</div>
+        ${err}
+      </div>
+      <div class="job-actions">${actions}</div>
+    </div>`;
+  }).join('');
+}
+
+async function loadJobs() {
+  try {
+    const res = await fetch('/api/jobs');
+    const jobs = await res.json();
+    const key = JSON.stringify(jobs);
+    if (key !== lastJobsJson) {
+      lastJobsJson = key;
+      renderJobs(jobs);
+    }
+    // 本次提交的任务完成后自动展开结果
+    if (currentJobId) {
+      const cur = jobs.find(j => j.id === currentJobId);
+      if (cur && cur.status === 'done' && viewingJobId !== currentJobId) {
+        viewResult(currentJobId);
+      }
+    }
+  } catch (e) { /* 网络抖动忽略，下轮重试 */ }
+}
+
+async function retryJob(id) {
+  const res = await fetch(`/api/jobs/${id}/retry`, { method: 'POST' });
+  if (!res.ok) {
+    const d = await res.json().catch(() => ({}));
+    alert(d.detail || '重试失败');
+    return;
+  }
+  currentJobId = id;
+  if (viewingJobId === id) viewingJobId = null;  // 重跑完成后自动刷新结果区
+  loadJobs();
+}
+
+async function removeJob(id) {
+  if (!confirm('删除该任务及其全部分析结果？')) return;
+  const res = await fetch(`/api/jobs/${id}`, { method: 'DELETE' });
+  if (!res.ok) {
+    const d = await res.json().catch(() => ({}));
+    alert(d.detail || '删除失败');
+    return;
+  }
+  if (viewingJobId === id) {
+    viewingJobId = null;
+    $('#result-card').hidden = true;
+  }
+  if (currentJobId === id) currentJobId = null;
+  loadJobs();
+}
+
+// ---------- 结果展示 ----------
+async function viewResult(jobId) {
+  let shots;
+  try {
+    const res = await fetch(`/api/jobs/${jobId}/result`);
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || '结果加载失败');
+    shots = await res.json();
+  } catch (e) {
+    alert(e.message);
+    return;
+  }
+  viewingJobId = jobId;
+  const jobRes = await fetch(`/api/jobs/${jobId}`);
+  const job = jobRes.ok ? await jobRes.json() : { name: '', model: '' };
+
+  $('#result-title').textContent = `拉片结果：${job.name}`;
+  $('#result-meta').textContent = `${job.model} · 共 ${shots.length} 个分镜`;
+  $('#dl-json').href = `/jobs/${jobId}/output/shots.json`;
+  $('#dl-md').href = `/jobs/${jobId}/output/report.md`;
+
+  $('#shot-list').innerHTML = shots.map(s => {
+    // 兼容旧格式（字符串单图）与新格式（首/中/尾三帧数组）
+    const rawImgs = Array.isArray(s['画面截图']) ? s['画面截图'] : (s['画面截图'] ? [s['画面截图']] : []);
+    const imgUrls = rawImgs.map(p => `/jobs/${jobId}/output/${encodeURI(p)}`);
+    const clipUrl = s['分镜视频'] ? `/jobs/${jobId}/output/${encodeURI(s['分镜视频'])}` : '';
+    const poster = imgUrls[1] || imgUrls[0] || '';  // 中间帧最能代表分镜，用作视频封面
+    const media = (imgUrls.length || clipUrl) ? `<div class="shot-media">
+      ${clipUrl ? `<div><video controls playsinline preload="none" ${poster ? `poster="${poster}"` : ''} src="${clipUrl}"></video><div class="media-tag">分镜视频</div></div>` : ''}
+      ${imgUrls.length ? `<div><div class="thumbs">${imgUrls.map(u => `<img loading="lazy" src="${u}" alt="分镜${s['分镜编号']}">`).join('')}</div><div class="media-tag">${imgUrls.length === 3 ? '首帧 / 中间帧 / 尾帧' : '画面截图'}</div></div>` : ''}
+    </div>` : '';
+    return `<div class="shot">
+      ${media}
+      <div class="shot-body">
+        <div class="shot-head">
+          <span class="shot-no">分镜 ${s['分镜编号']}</span>
+          <span class="shot-time">${escapeHtml(s['开始时间'])} ~ ${escapeHtml(s['结束时间'])}</span>
+        </div>
+        <div class="shot-row"><span class="label">口播</span>${escapeHtml(s['口播文字']) || '（无）'}</div>
+        <div class="shot-row"><span class="label">画面</span>${escapeHtml(s['画面描述'])}</div>
+        ${renderProduction(s['制作方法'])}
+      </div>
+    </div>`;
+  }).join('');
+
+  const card = $('#result-card');
+  card.hidden = false;
+  card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// ---------- 启动 ----------
+// 同时只播放一个分镜视频（play 事件不冒泡，用捕获阶段监听）
+$('#shot-list').addEventListener('play', e => {
+  if (e.target.tagName !== 'VIDEO') return;
+  document.querySelectorAll('#shot-list video').forEach(v => {
+    if (v !== e.target) v.pause();
+  });
+}, true);
+
+loadModels();
+loadJobs();
+setInterval(loadJobs, 2500);
+</script>
+</body>
+</html>

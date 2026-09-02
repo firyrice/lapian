@@ -1,0 +1,15 @@
+# 包含 API 密钥,不入库(参考 config.example.yaml)
+config.yaml
+
+# 任务产物(生成的视频/中间文件,体积大)
+jobs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# macOS
+.DS_Store
