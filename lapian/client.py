@@ -73,6 +73,24 @@ class LLMClient:
                     time.sleep(wait)
         raise RuntimeError(f"模型请求失败，已重试 {self.max_retries} 次: {last_err}")
 
+    def chat(self, prompt: str, model: str) -> str:
+        """纯文本调用（无视频），用于全片统筹类任务。网络/5xx/限流统一指数退避重试。"""
+        last_err = None
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                resp = self.client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                return resp.choices[0].message.content or ""
+            except Exception as e:
+                last_err = e
+                wait = 2 ** attempt * 5
+                log.warning("文本请求失败（第 %d/%d 次）: %s；%ds 后重试", attempt, self.max_retries, e, wait)
+                if attempt < self.max_retries:
+                    time.sleep(wait)
+        raise RuntimeError(f"文本请求失败，已重试 {self.max_retries} 次: {last_err}")
+
 
 def parse_json(text: str) -> list:
     """从模型输出中稳健提取 JSON 数组。
@@ -98,3 +116,26 @@ def parse_json(text: str) -> list:
         except json.JSONDecodeError:
             continue
     raise ValueError(f"无法从模型输出解析 JSON 数组，输出前 300 字符: {text[:300]}")
+
+
+def parse_json_obj(text: str) -> dict:
+    """从模型输出中稳健提取 JSON 对象（与 parse_json 同思路，目标是 {...}）。"""
+    text = text.strip()
+    candidates = [text]
+    # 去掉 ```json ... ``` 围栏
+    fence = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
+    if fence:
+        candidates.insert(0, fence.group(1).strip())
+    # 截取第一个 { 到最后一个 }
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end > start:
+        candidates.append(text[start:end + 1])
+
+    for cand in candidates:
+        try:
+            data = json.loads(cand)
+            if isinstance(data, dict):
+                return data
+        except json.JSONDecodeError:
+            continue
+    raise ValueError(f"无法从模型输出解析 JSON 对象，输出前 300 字符: {text[:300]}")

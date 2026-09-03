@@ -9,13 +9,24 @@ from .media import Chunk
 
 log = logging.getLogger("lapian.analyze")
 
-REQUIRED_KEYS = ("start", "end", "asr_text", "description", "representative_time", "production")
+REQUIRED_KEYS = ("start", "end", "asr_text", "shot_type", "description", "representative_time", "production")
 
 FORMS = ("raw", "mg-compose", "mg-pure")
 ALL_MATERIAL_TYPES = ("a-roll", "local", "cloud", "web", "meme", "gen-img", "gen-vid")
+# 无口播分镜的合法类型（有口播的一律归一为「口播镜」）
+SPECIAL_SHOT_TYPES = ("片头", "章节卡", "转场卡", "片尾", "纯画面")
+# 特殊镜（片头/转场卡等）天然短，时长下限放宽到此值；口播镜仍用 min_shot_duration
+SPECIAL_SHOT_MIN_DURATION = 0.5
 
 _MATERIAL_STR_KEYS = ("type", "role", "desc", "query", "specs", "treatment")
 _PRODUCTION_STR_KEYS = ("layout", "timeline", "sfx", "notes")
+# 分镜级「视频编导构思」八个子字段（与 prompts.yaml【视频编导构思规格】对齐，改动要同步）
+_DIRECTING_STR_KEYS = ("一句话阐述", "叙事功能", "表达目标", "视觉策略", "声画关系", "对位锚点", "情绪节奏", "取舍基准")
+# 全片级「编导构思」字段（与 prompts.yaml 的 concept 环节对齐，改动要同步）
+_CONCEPT_STR_KEYS = ("一句话立意", "节奏设计")
+_CONCEPT_SECTION_KEYS = ("章节名", "覆盖分镜", "叙事任务", "情绪基调")
+_CONCEPT_GROUPS = {"素材要求": ("国家", "年代", "素材类型", "素材风格"),
+                   "MG画风": ("职能与密度", "配色", "字体", "动画样式", "版式与底纹")}
 
 
 def _to_float(v, default: float = 0.0) -> float:
@@ -112,6 +123,40 @@ def _normalize_production(raw, allowed_types: list[str], shot_label: str,
     return out
 
 
+def _normalize_directing(raw, shot_label: str) -> dict:
+    """归一化「视频编导构思」：模型偶发漏给或给成字符串，兜底为空骨架，保证下游结构稳定。
+
+    软词表字段（叙事功能/视觉策略等）不做枚举硬校验——模型自造短语也保留，
+    只在 prompt 层引导向词表收敛，避免误删有信息量的输出。
+    """
+    if isinstance(raw, str):
+        # 模型把构思压成了一句话：塞进「一句话阐述」，其余留空
+        return {k: (raw.strip() if k == "一句话阐述" else "") for k in _DIRECTING_STR_KEYS}
+    if not isinstance(raw, dict):
+        if raw is not None:
+            log.warning("%s 的 directing 字段非法（%r），输出空骨架", shot_label, type(raw).__name__)
+        return {k: "" for k in _DIRECTING_STR_KEYS}
+    return {k: _s(raw.get(k)) for k in _DIRECTING_STR_KEYS}
+
+
+def normalize_concept(raw) -> dict:
+    """归一化全片编导构思（concept 环节输出）：补齐缺失键，保证产物结构稳定。"""
+    if not isinstance(raw, dict):
+        log.warning("全片编导构思输出不是对象（%r），输出空骨架", type(raw).__name__)
+        raw = {}
+    out = {k: _s(raw.get(k)) for k in _CONCEPT_STR_KEYS}
+    sections = raw.get("章节结构")
+    out["章节结构"] = [
+        {k: _s(item.get(k)) for k in _CONCEPT_SECTION_KEYS}
+        for item in sections if isinstance(item, dict)
+    ] if isinstance(sections, list) else []
+    for group, keys in _CONCEPT_GROUPS.items():
+        g = raw.get(group)
+        out[group] = ({k: _s(g.get(k)) for k in keys} if isinstance(g, dict)
+                      else {k: "" for k in keys})
+    return out
+
+
 def analyze_chunk(client: LLMClient, chunk: Chunk, model: str, prompt_template: str,
                   max_parse_retries: int = 2, min_shot_duration: float = 2.0,
                   available_material_types: list[str] = None,
@@ -151,11 +196,24 @@ def analyze_chunk(client: LLMClient, chunk: Chunk, model: str, prompt_template: 
         if not (start <= rep <= end):
             rep = (start + end) / 2  # 代表帧时间非法时回退为分镜中点
 
+        asr = str(s.get("asr_text") or "").strip()
+        # shot_type 归一化：有口播一律「口播镜」；无口播必须在特殊类型枚举内，否则回退「纯画面」
+        shot_type = _s(s.get("shot_type"))
+        if asr:
+            shot_type = "口播镜"
+        elif shot_type not in SPECIAL_SHOT_TYPES:
+            if shot_type and shot_type != "口播镜":
+                log.warning("块 %d 第 %d 个分镜的 shot_type %r 非法，回退为 纯画面",
+                            chunk.index, i + 1, shot_type)
+            shot_type = "纯画面"
+
         results.append({
             "start": round(start, 1),
             "end": round(end, 1),
             "representative_time": round(rep, 1),
-            "asr_text": str(s.get("asr_text") or "").strip(),
+            "asr_text": asr,
+            "shot_type": shot_type,
+            "directing": _normalize_directing(s.get("directing"), f"块 {chunk.index} 第 {i + 1} 个分镜"),
             "description": str(s.get("description") or "").strip(),
             # timeline 的秒数按【块内相对时间】判断（模型给的 start 也是块内相对）
             "production": _normalize_production(
@@ -165,11 +223,13 @@ def analyze_chunk(client: LLMClient, chunk: Chunk, model: str, prompt_template: 
         })
 
     # 过滤退化分镜（模型偶发在块边界输出 start≈end 的幻影分镜）
+    # 口播镜下限 min_shot_duration；无口播的特殊镜（片头/转场卡等）天然更短，下限放宽
     before = len(results)
-    results = [s for s in results if s["end"] - s["start"] >= min_shot_duration]
+    results = [s for s in results
+               if s["end"] - s["start"] >= (SPECIAL_SHOT_MIN_DURATION
+                                            if s["shot_type"] != "口播镜" else min_shot_duration)]
     if len(results) < before:
-        log.info("块 %d 过滤掉 %d 个时长 < %.1fs 的退化分镜",
-                 chunk.index, before - len(results), min_shot_duration)
+        log.info("块 %d 过滤掉 %d 个时长不足的退化分镜", chunk.index, before - len(results))
 
     results.sort(key=lambda s: s["start"])
     log.info("块 %d（偏移 %.0fs）分析出 %d 个分镜", chunk.index, chunk.offset, len(results))

@@ -1,4 +1,4 @@
-"""流水线：切块 -> 并行端到端分析 -> 截帧回填 -> 汇总输出。支持断点续跑。"""
+"""流水线：切块 -> 并行端到端分析 -> 全片编导构思 -> 截帧回填 -> 汇总输出。支持断点续跑。"""
 
 import json
 import logging
@@ -7,8 +7,8 @@ from pathlib import Path
 
 import yaml
 
-from .analyze import analyze_chunk
-from .client import LLMClient
+from .analyze import analyze_chunk, normalize_concept
+from .client import LLMClient, parse_json_obj
 from .media import cut_clip, extract_frame, probe, split_chunks
 
 log = logging.getLogger("lapian.pipeline")
@@ -66,6 +66,40 @@ class Pipeline:
                     progress_cb("analyze", f"{done}/{len(chunks)} 块完成")
         all_shots.sort(key=lambda s: s["start"])
         return all_shots
+
+    def _directing_concept(self, shots: list[dict], out_dir: Path) -> dict:
+        """全片编导构思：所有分镜合并后做一次纯文本统筹调用（不带视频），落盘 concept.json。
+
+        输入是压缩后的全片分镜清单（口播 + 每镜构思摘要 + 画面摘要）。
+        分镜级 directing 已在 analyze 阶段逐镜产出，这里只倒推全片一致性的东西
+        （立意 / 章节 / 节奏 / 素材要求 / MG画风）。结果带缓存，重跑跳过。
+        """
+        cache = out_dir / "concept.json"
+        if cache.exists():
+            log.info("全片编导构思已有缓存，跳过")
+            return json.loads(cache.read_text(encoding="utf-8"))
+        brief = []
+        for i, s in enumerate(shots, 1):
+            d = s.get("directing") or {}
+            brief.append(
+                f"分镜{i}（{_fmt_ts(s['start'])}~{_fmt_ts(s['end'])}，{s.get('shot_type') or '口播镜'}）"
+                f"\n  口播：{s['asr_text'] or '（无）'}"
+                f"\n  构思：{d.get('一句话阐述', '')}［{d.get('叙事功能', '')}］"
+                f"\n  画面：{s['description'][:150]}")
+        prompt = self.prompts["concept"].replace("{shots_brief}", "\n".join(brief))
+        concept = None
+        for attempt in range(1, 3):
+            raw = self.client.chat(prompt, self.model)
+            try:
+                concept = normalize_concept(parse_json_obj(raw))
+                break
+            except ValueError as e:
+                log.warning("全片编导构思输出解析失败（第 %d/2 次）: %s", attempt, e)
+        if concept is None:
+            raise RuntimeError("全片编导构思多次输出非法 JSON，放弃")
+        cache.write_text(json.dumps(concept, ensure_ascii=False, indent=2), encoding="utf-8")
+        log.info("全片编导构思完成：%d 个章节", len(concept.get("章节结构") or []))
+        return concept
 
     def _attach_screenshots(self, shots: list[dict], video_path: Path, shot_dir: Path,
                             progress_cb=None) -> None:
@@ -153,6 +187,10 @@ class Pipeline:
         return {
             "分镜编号": i,
             "口播文字": shot["asr_text"],
+            # 分镜类型标注；老缓存（chunk_results/）没有 shot_type，按有无口播推导
+            "分镜类型": shot.get("shot_type") or ("口播镜" if shot["asr_text"] else "纯画面"),
+            # 编导构思（决策层）；老缓存（chunk_results/）没有这个字段，用 get 兜住
+            "视频编导构思": shot.get("directing", {}),
             "画面截图": shot.get("screenshots", []),
             "分镜视频": shot.get("clip", ""),
             "画面描述": shot["description"],
@@ -161,6 +199,44 @@ class Pipeline:
             "开始时间": _fmt_ts(shot["start"]),
             "结束时间": _fmt_ts(shot["end"]),
         }
+
+    @staticmethod
+    def _directing_lines(d: dict) -> list[str]:
+        """把分镜级编导构思渲染成 report.md 小节（紧跟口播文字之后，对应 口播→构思→画面 的链）。"""
+        if not d or not any(d.values()):
+            return []
+        lines = []
+        if d.get("一句话阐述"):
+            lines.append(f"**编导构思**：{d['一句话阐述']}")
+        facets = " ｜ ".join(f"{k}：{d[k]}" for k in ("叙事功能", "视觉策略", "声画关系", "情绪节奏") if d.get(k))
+        if facets:
+            lines.append(facets)
+        lines.extend(f"{k}：{d[k]}" for k in ("表达目标", "对位锚点", "取舍基准") if d.get(k))
+        return ["\n".join(lines) + "\n"] if lines else []
+
+    @staticmethod
+    def _concept_lines(concept: dict) -> list[str]:
+        """把全片编导构思渲染成 report.md 顶部小节。"""
+        if not concept:
+            return []
+        lines = ["## 全片编导构思\n"]
+        if concept.get("一句话立意"):
+            lines.append(f"**一句话立意**：{concept['一句话立意']}\n")
+        sections = concept.get("章节结构") or []
+        if sections:
+            lines.append("**章节结构**：\n")
+            for s in sections:
+                tail = " ｜ ".join(x for x in (s.get("叙事任务"), s.get("情绪基调")) if x)
+                lines.append(f"- {s.get('章节名', '')}（分镜 {s.get('覆盖分镜', '')}）{f'—— {tail}' if tail else ''}")
+            lines.append("")
+        if concept.get("节奏设计"):
+            lines.append(f"**节奏设计**：{concept['节奏设计']}\n")
+        for group in ("素材要求", "MG画风"):
+            g = concept.get(group) or {}
+            if any(g.values()):
+                lines.append(f"**{group}**：" + " ｜ ".join(f"{k}={v}" for k, v in g.items() if v) + "\n")
+        lines.append("---\n")
+        return lines
 
     @staticmethod
     def _production_lines(prod: dict) -> list[str]:
@@ -193,19 +269,23 @@ class Pipeline:
                 lines.append(f"{label}：{prod[key]}\n")
         return lines
 
-    def _write_outputs(self, shots: list[dict], out_dir: Path) -> None:
+    def _write_outputs(self, shots: list[dict], out_dir: Path, concept: dict = None) -> None:
         records = [self._final_record(i, s) for i, s in enumerate(shots, 1)]
         (out_dir / "shots.json").write_text(
             json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
 
         lines = ["# 拉片分析报告\n"]
+        lines.extend(self._concept_lines(concept or {}))
         for r in records:
-            lines.append(f"## 分镜 {r['分镜编号']}（{r['开始时间']} ~ {r['结束时间']}）\n")
+            # 非常规口播镜（片头/章节卡/转场卡等）在标题行标注，便于快速定位无口播段落
+            type_tag = f" · {r['分镜类型']}" if r["分镜类型"] and r["分镜类型"] != "口播镜" else ""
+            lines.append(f"## 分镜 {r['分镜编号']}（{r['开始时间']} ~ {r['结束时间']}）{type_tag}\n")
             if r["画面截图"]:
                 lines.append(" ".join(f"![分镜{r['分镜编号']}]({p})" for p in r["画面截图"]) + "\n")
             if r["分镜视频"]:
                 lines.append(f"🎬 [分镜视频]({r['分镜视频']})\n")
             lines.append(f"**口播文字**：{r['口播文字'] or '（无）'}\n")
+            lines.extend(self._directing_lines(r["视频编导构思"]))
             lines.append(f"**画面描述**：{r['画面描述']}\n")
             lines.extend(self._production_lines(r["制作方法"]))
             lines.append("---\n")
@@ -214,7 +294,7 @@ class Pipeline:
     # ---- 主流程 ----
 
     def run(self, input_video: Path, out_dir: Path, progress_cb=None) -> Path:
-        """progress_cb(stage, detail)：可选进度回调，stage ∈ split/analyze/screenshot/clip/write。"""
+        """progress_cb(stage, detail)：可选进度回调，stage ∈ split/analyze/concept/screenshot/clip/write。"""
         def report(stage: str, detail: str = "") -> None:
             if progress_cb:
                 try:
@@ -228,7 +308,7 @@ class Pipeline:
         chunk_json_dir.mkdir(exist_ok=True)
         shot_dir = out_dir / "shots"
 
-        log.info("[1/5] 视频切块 ...")
+        log.info("[1/6] 视频切块 ...")
         cc = self.cfg["chunk"]
         chunks = split_chunks(input_video, chunk_video_dir,
                               chunk_len=cc["length_seconds"], max_width=cc["max_width"],
@@ -236,20 +316,24 @@ class Pipeline:
                               fps=cc.get("fps", 5),
                               progress_cb=lambda i, n: report("split", f"{i}/{n} 块"))
 
-        log.info("[2/5] 逐块端到端分析（模型: %s） ...", self.model)
+        log.info("[2/6] 逐块端到端分析（模型: %s） ...", self.model)
         report("analyze", f"共 {len(chunks)} 块")
         shots = self._analyze_chunks(chunks, chunk_json_dir, progress_cb)
         if not shots:
             raise RuntimeError("模型未输出任何分镜")
 
-        log.info("[3/5] 截取 %d 个分镜的代表性画面 ...", len(shots))
+        log.info("[3/6] 全片编导构思统筹 ...")
+        report("concept", f"汇总 {len(shots)} 个分镜")
+        concept = self._directing_concept(shots, out_dir)
+
+        log.info("[4/6] 截取 %d 个分镜的代表性画面 ...", len(shots))
         self._attach_screenshots(shots, input_video, shot_dir, progress_cb)
 
-        log.info("[4/5] 切分 %d 个分镜的短片段 ...", len(shots))
+        log.info("[5/6] 切分 %d 个分镜的短片段 ...", len(shots))
         self._attach_clips(shots, input_video, shot_dir, progress_cb)
 
-        log.info("[5/5] 汇总输出 ...")
+        log.info("[6/6] 汇总输出 ...")
         report("write", "生成报告")
-        self._write_outputs(shots, out_dir)
+        self._write_outputs(shots, out_dir, concept)
         log.info("完成！结果目录: %s", out_dir)
         return out_dir / "shots.json"
